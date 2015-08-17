@@ -193,5 +193,5 @@
     require('winston'),
     require('fs'),
     require('path'),
-    require('./number')
+    require('./lib/number')
 );
