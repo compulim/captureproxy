@@ -1,4 +1,5 @@
 {
+    "logLevel": "debug",
     "port": 5865,
     "requestTimeout": 60000,
     "capturePattern": "\\.flv|\\.mp4|\\.m4v|\\.ts",

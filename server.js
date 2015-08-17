@@ -2,7 +2,7 @@
     'use strict';
 
     var app = require('http').createServer(),
-        port = require('./config').port || process.env.port || process.argv[2] || 5865;
+        port = require('./config')().port || process.env.port || process.argv[2] || 5865;
 
     app.on('request', function (req, res) {
         new Session(req, res);
@@ -16,7 +16,7 @@
 
     winston.add(winston.transports.Console, {
         colorize: true,
-        level: 'info'
+        level: require('./config')().logLevel || 'info'
     });
 
     var webrootPath = process.env.webroot_path;
