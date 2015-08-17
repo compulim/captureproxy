@@ -88,8 +88,11 @@
             req = that.req,
             res = that.res,
             pattern = config().capturePattern,
-            filename = path.resolve(config().capturePath || '', url.parse(req.url).path.split('/').pop().split('?')[0]),
+            urlWithoutQuery = req.url.split('?')[0],
+            basename = url.parse(urlWithoutQuery).path.split('/').pop(),
+            filename = path.resolve(config().capturePath || '', basename),
             fd,
+            lastReport = Date.now(),
             numBytes = 0;
 
         pattern = pattern && new RegExp(pattern);
@@ -103,27 +106,34 @@
 
         cres.pause();
 
-        if (cres.statusCode === 200 && pattern && pattern.test(req.url)) {
-            cres.pause();
-
+        if (cres.statusCode === 200 && pattern && pattern.test(urlWithoutQuery)) {
             try {
                 fd = fs.openSync(filename, 'w');
             } catch (ex) {
-                return winston.warn('Failed to capture to ' + filename);
+                return winston.warn('Failed to capture to ' + basename + ' due to ' + ex);
             }
 
             var contentLength = cres.headers['content-length'];
 
-            winston.info('Capturing to ' + filename + (contentLength ? ' (' + number.bytes(contentLength) + ')' : ''));
+            winston.info('Start capturing to ' + basename + (contentLength ? ' (' + number.bytes(contentLength) + ')' : ''));
         }
 
         cres.on('data', function (data) {
             res.write(data);
 
-            try {
-                fd && fs.writeSync(fd, data, 0, data.length);
-            } catch (ex) {
-                winston.info('Failed to write to capture file ' + filename + ' due to ' + ex);
+            if (fd) {
+                var now = Date.now();
+
+                try {
+                    fs.writeSync(fd, data, 0, data.length, numBytes);
+                } catch (ex) {
+                    winston.info('Failed to write to capture file ' + basename + ' due to ' + ex);
+                }
+
+                if (now - lastReport > 1000) {
+                    winston.info('Capturing to ' + basename + ' (' + number.bytes(numBytes + data.length) + ' downloaded)');
+                    lastReport = now;
+                }
             }
 
             numBytes += data.length;
@@ -132,7 +142,7 @@
 
             if (fd) {
                 fs.close(fd);
-                winston.info('Captured to ' + filename + ' (' + number.bytes(numBytes) + ')');
+                winston.info('Captured to ' + basename + ' (' + number.bytes(numBytes) + ')');
             }
 
             that.flag('completed');
@@ -141,10 +151,12 @@
             that.flag('error', err);
 
             if (fd) {
-                winston.warn('Aborted during capture to ' + filename);
+                winston.warn('Aborted during capture to ' + basename);
 
                 fs.close(fd, function () {
-                    fs.unlink(filename);
+                    setTimeout(function () {
+                        fs.unlink(basename);
+                    }, 5000);
                 });
             }
         }).resume();

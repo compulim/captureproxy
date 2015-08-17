@@ -1,8 +1,8 @@
 {
-    "logLevel": "debug",
+    "logLevel": "info",
     "port": 5865,
     "requestTimeout": 60000,
-    "capturePattern": "\\.flv|\\.mp4|\\.m4v|\\.ts",
+    "capturePattern": "\\.flv|\\.mp4|\\.m4v|\\.ts|\\.zip|\\.exe|\\.msi",
     "capturePath": "captured",
     "xproxy": {
         "hostname": "127.0.0.1",
