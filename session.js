@@ -25,7 +25,7 @@
             headers: linq(req.headers).where(function (name) {
                 return !proxyHeaderPattern.test(name);
             }).run(),
-            agent: agentKeepAlive
+            agent: false // agentKeepAlive
         };
 
         if (proxyConfig) {
