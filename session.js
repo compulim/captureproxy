@@ -119,7 +119,13 @@
 
         cres.on('data', function (data) {
             res.write(data);
-            fd && fs.write(fd, data, 0, data.length);
+
+            try {
+                fd && fs.writeSync(fd, data, 0, data.length);
+            } catch (ex) {
+                winston.info('Failed to write to capture file ' + filename + ' due to ' + ex);
+            }
+
             numBytes += data.length;
         }).on('end', function () {
             res.end();
