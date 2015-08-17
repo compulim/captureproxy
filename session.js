@@ -91,7 +91,7 @@
             urlWithoutQuery = req.url.split('?')[0],
             basename = url.parse(urlWithoutQuery).path.split('/').pop(),
             filename = path.resolve(config().capturePath || '', basename),
-            fd,
+            writeStream,
             lastReport = Date.now(),
             numBytes = 0;
 
@@ -107,11 +107,7 @@
         cres.pause();
 
         if (cres.statusCode === 200 && pattern && pattern.test(urlWithoutQuery)) {
-            try {
-                fd = fs.openSync(filename, 'w');
-            } catch (ex) {
-                return winston.warn('Failed to capture to ' + basename + ' due to ' + ex);
-            }
+            writeStream = fs.createWriteStream(filename);
 
             var contentLength = cres.headers['content-length'];
 
@@ -121,14 +117,10 @@
         cres.on('data', function (data) {
             res.write(data);
 
-            if (fd) {
+            if (writeStream) {
                 var now = Date.now();
 
-                try {
-                    fs.writeSync(fd, data, 0, data.length, numBytes);
-                } catch (ex) {
-                    winston.info('Failed to write to capture file ' + basename + ' due to ' + ex);
-                }
+                writeStream.write(data);
 
                 if (now - lastReport > 1000) {
                     winston.info('Capturing to ' + basename + ' (' + number.bytes(numBytes + data.length) + ' downloaded)');
@@ -140,8 +132,8 @@
         }).on('end', function () {
             res.end();
 
-            if (fd) {
-                fs.close(fd);
+            if (writeStream) {
+                writeStream.close();
                 winston.info('Captured to ' + basename + ' (' + number.bytes(numBytes) + ')');
             }
 
@@ -150,14 +142,14 @@
         }).on('close', function (err) {
             that.flag('error', err);
 
-            if (fd) {
+            if (writeStream) {
                 winston.warn('Aborted during capture to ' + basename);
 
-                fs.close(fd, function () {
-                    setTimeout(function () {
-                        fs.unlink(basename);
-                    }, 5000);
-                });
+                writeStream.close();
+
+                setTimeout(function () {
+                    fs.unlink(filename);
+                }, 5000);
             }
         }).resume();
     };
