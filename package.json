@@ -1,0 +1,9 @@
+{
+  "name": "cnr-preauthproxy",
+  "private": true,
+  "dependencies": {
+    "agentkeepalive": "0.*",
+    "async-linq": "^1.0.4",
+    "winston": "*"
+  }
+}
