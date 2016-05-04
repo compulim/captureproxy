@@ -107,7 +107,13 @@
         cres.pause();
 
         if (cres.statusCode === 200 && pattern && pattern.test(urlWithoutQuery)) {
-            writeStream = fs.createWriteStream(filename);
+            try {
+                writeStream = fs.createWriteStream(filename);
+            } catch (err) {
+                winston.error('Failed to write to file ' + filename + ' due to ' + err);
+                res.status(500).end();
+                cres.close();
+            }
 
             var contentLength = cres.headers['content-length'];
 
