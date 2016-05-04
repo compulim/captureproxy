@@ -135,14 +135,14 @@
         }
 
         cres.on('data', function (data) {
+            that._debug(`Got ${data.length} bytes`);
+
             res.write(data);
 
             if (writeStream) {
                 var now = Date.now();
 
                 writeStream.write(data);
-
-                that._debug(`Got ${data.length} bytes`);
 
                 if (now - lastReport > 1000) {
                     winston.info('Capturing to ' + basename + ' (' + number.bytes(numBytes + data.length) + ' downloaded)');
@@ -154,6 +154,8 @@
         }).on('end', function () {
             res.end();
 
+            that._debug(`Response body finished`);
+
             if (writeStream) {
                 that._debug(`Closing write filestream`);
                 writeStream.close();
@@ -164,6 +166,8 @@
             winston.debug('Completed ' + req.method + ' ' + req.url);
         }).on('close', function (err) {
             that.flag('error', err);
+
+            that._debug(`Response body aborted`);
 
             if (writeStream) {
                 winston.warn('Aborted during capture to ' + basename);
