@@ -1,12 +1,16 @@
 !function (ConnectSession, net, Session, url, winston) {
     'use strict';
 
+    const debug = require('debug')('server');
+
     var app = require('http').createServer(),
         port = require('./config')().port || process.env.port || process.argv[2] || 5865;
 
     app.on('request', function (req, res) {
+        debug('Got a new request');
         new Session(req, res);
     }).on('connect', function (req, socket, head) {
+        debug('Got a HTTPS CONNECT request');
         new ConnectSession(req, socket, head);
     }).listen(port, function () {
         winston.info('Proxy started and listening to port ' + port);
