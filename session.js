@@ -7,12 +7,13 @@
 
     function Session(req, res) {
         var that = this,
-            method = req.method,
-            debug = require('debug')(`session#${++sessionSeq}`);
+            method = req.method;
+
+        this._debug = require('debug')(`session#${++sessionSeq}`);
 
         Semaphore.call(that);
 
-        debug(`New session for ${req.url}`);
+        this._debug(`New session for ${req.url}`);
 
         that.req = req;
         that.res = res;
@@ -44,13 +45,13 @@
         if (method === 'GET') {
             that.flag('requestbodyready', null);
         } else {
-            debug(`Reading request body`);
+            that._debug(`Reading request body`);
 
             readAll(req, function (err, body) {
                 if (err) {
                     that.flag('error', err);
                 } else {
-                    debug(`Got request body of ${body.length} bytes`)
+                    that._debug(`Got request body of ${body.length} bytes`)
                     that.flag('requestbodyready', body);
                 }
             });
@@ -76,7 +77,7 @@
             proxyConfig = config().proxy;
 
         if (proxyConfig && cres.statusCode === 407 && cres.headers['proxy-authenticate']) {
-            debug(`Sending request via upstream proxy`);
+            that._debug(`Sending request via upstream proxy`);
 
             var options = that._httpOptions;
 
@@ -106,7 +107,7 @@
 
         pattern = pattern && new RegExp(pattern);
 
-        debug(`Sending header ${cres.statusCode} to browser ${JSON.stringify(cres.headers)}`);
+        that._debug(`Sending header ${cres.statusCode} to browser ${JSON.stringify(cres.headers)}`);
 
         res.writeHead(
             cres.statusCode,
@@ -118,7 +119,7 @@
         cres.pause();
 
         if (cres.statusCode === 200 && pattern && pattern.test(urlWithoutQuery)) {
-            debug(`Creating filestream for capture at ${filename}`);
+            that._debug(`Creating filestream for capture at ${filename}`);
 
             try {
                 writeStream = fs.createWriteStream(filename);
@@ -141,7 +142,7 @@
 
                 writeStream.write(data);
 
-                debug(`Got ${data.length} bytes`);
+                that._debug(`Got ${data.length} bytes`);
 
                 if (now - lastReport > 1000) {
                     winston.info('Capturing to ' + basename + ' (' + number.bytes(numBytes + data.length) + ' downloaded)');
@@ -154,7 +155,7 @@
             res.end();
 
             if (writeStream) {
-                debug(`Closing write filestream`);
+                that._debug(`Closing write filestream`);
                 writeStream.close();
                 winston.info('Captured to ' + basename + ' (' + number.bytes(numBytes) + ')');
             }
