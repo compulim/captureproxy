@@ -2,13 +2,17 @@
     'use strict';
 
     var agentKeepAlive = new (require('agentkeepalive'))(),
-        proxyHeaderPattern = /^proxy-/i;
+        proxyHeaderPattern = /^proxy-/i,
+        sessionSeq = 0;
 
     function Session(req, res) {
         var that = this,
-            method = req.method;
+            method = req.method,
+            debug = require('debug')(`session#${++sessionSeq}`);
 
         Semaphore.call(that);
+
+        debug(`New session for ${req.url}`);
 
         that.req = req;
         that.res = res;
@@ -40,10 +44,13 @@
         if (method === 'GET') {
             that.flag('requestbodyready', null);
         } else {
+            debug(`Reading request body`);
+
             readAll(req, function (err, body) {
                 if (err) {
                     that.flag('error', err);
                 } else {
+                    debug(`Got request body of ${body.length} bytes`)
                     that.flag('requestbodyready', body);
                 }
             });
@@ -69,6 +76,8 @@
             proxyConfig = config().proxy;
 
         if (proxyConfig && cres.statusCode === 407 && cres.headers['proxy-authenticate']) {
+            debug(`Sending request via upstream proxy`);
+
             var options = that._httpOptions;
 
             options.headers['proxy-authorization'] = 'BASIC ' + toBase64(proxyConfig.username + ':' + proxyConfig.password);
@@ -97,6 +106,8 @@
 
         pattern = pattern && new RegExp(pattern);
 
+        debug(`Sending header ${cres.statusCode} to browser ${JSON.stringify(cres.headers)}`);
+
         res.writeHead(
             cres.statusCode,
             linq(cres.headers).where(function (name) {
@@ -107,6 +118,8 @@
         cres.pause();
 
         if (cres.statusCode === 200 && pattern && pattern.test(urlWithoutQuery)) {
+            debug(`Creating filestream for capture at ${filename}`);
+
             try {
                 writeStream = fs.createWriteStream(filename);
             } catch (err) {
@@ -128,6 +141,8 @@
 
                 writeStream.write(data);
 
+                debug(`Got ${data.length} bytes`);
+
                 if (now - lastReport > 1000) {
                     winston.info('Capturing to ' + basename + ' (' + number.bytes(numBytes + data.length) + ' downloaded)');
                     lastReport = now;
@@ -139,6 +154,7 @@
             res.end();
 
             if (writeStream) {
+                debug(`Closing write filestream`);
                 writeStream.close();
                 winston.info('Captured to ' + basename + ' (' + number.bytes(numBytes) + ')');
             }
