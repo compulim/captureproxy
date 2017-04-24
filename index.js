@@ -1,6 +1,6 @@
 'use strict';
 
-const ConnectSession = require('./connectsession');
+const ConnectSession = require('./connectSession');
 const debug          = require('debug')('server');
 const net            = require('net');
 const Session        = require('./session');
