@@ -3,8 +3,9 @@
   "private": true,
   "dependencies": {
     "agentkeepalive": "^2.0.3",
-    "async-linq": "^1.0.4",
-    "debug": "^2.2.0",
-    "winston": "*"
+    "debug": "^2.2.0"
+  },
+  "scripts": {
+    "start": "node ."
   }
 }

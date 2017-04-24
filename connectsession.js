@@ -1,108 +1,102 @@
-!function (config, http, net, Semaphore, url, winston) {
-    'use strict';
+'use strict';
 
-    var agentKeepAlive = new (require('agentkeepalive'))(),
-        proxyHeaderPattern = /^proxy-/i;
+const agentKeepAlive     = new (require('agentkeepalive'))();
+const config             = require('./config');
+const filterMap          = require('./lib/filterMap');
+const http               = require('http');
+const net                = require('net');
+const url                = require('url');
+const { Semaphore }      = require('./lib/semaphore');
 
-    function ConnectSession(req, socket, head) {
-        var that = this;
+const PROXY_HEADER_PATTERN = /^proxy-/;
 
-        Semaphore.call(that);
+class ConnectSession extends Semaphore {
+  constructor(req, socket, head) {
+    super();
 
-        that._socket = socket;
+    this._debug = require('debug')(`session#${ Math.random().toString(36).substr(2, 5) }`);
+    this._socket = socket;
 
-        that.when('connect', that.whenconnect.bind(that));
+    this.when('connect', this.handleWhenConnect.bind(this));
+    this.when('error', this.handleWhenError.bind(this));
 
-        var target = req.url,
-            proxyConfig = config().proxy;
+    const target = req.url;
+    const proxyConfig = config().proxy;
 
-        if (proxyConfig) {
-            var headers = Object.getOwnPropertyNames(req.headers).reduce(function (headers, name) {
-                    if (!/^proxy-/.test(name)) {
-                        headers[name] = req.headers[value];
-                    }
-                }, {});
+    if (proxyConfig) {
+      const headers = filterMap(headers, (value, name) => !PROXY_HEADER_PATTERN.test(name));
 
-            if (proxyConfig.username && proxyConfig.password) {
-                headers['proxy-authorization'] = 'BASIC ' + toBase64(proxyConfig.username + ':' + proxyConfig.password);
-            }
+      if (proxyConfig.username && proxyConfig.password) {
+        headers['proxy-authorization'] = 'BASIC ' + toBase64(proxyConfig.username + ':' + proxyConfig.password);
+      }
 
-            http.request({
-                headers: headers,
-                hostname: proxyConfig.hostname,
-                port: proxyConfig.port,
-                method: 'CONNECT',
-                path: target,
-                agent: false
-            }).on('connect', function (res, clientSocket, clientHead) {
-                if (res.statusCode === 200) {
-                    winston.debug('CONNECT-ed to ' + target + ' via proxy');
+      http.request({
+        agent   : false,
+        headers : headers,
+        hostname: proxyConfig.hostname,
+        method  : 'CONNECT',
+        path    : target,
+        port    : proxyConfig.port
+      }).on('connect', (res, clientSocket, clientHead) => {
+        if (res.statusCode === 200) {
+          this._debug('CONNECT-ed to ' + target + ' via proxy');
 
-                    that.flag('connect', clientSocket, socket);
+          this.flag('connect', clientSocket, socket);
 
-                    socket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
-                    socket.write(clientHead);
+          socket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+          socket.write(clientHead);
 
-                    clientSocket.write(head);
-                } else {
-                    winston.info('Failed to CONNECT to ' + target + ' via proxy, server returned ' + res.statusCode);
-                    socket.destroy();
-                }
-            }).on('error', function (err) {
-                winston.info('Failed to CONNECT to ' + target + ' via proxy', { err: err });
-                socket.destroy();
-            }).end();
+          clientSocket.write(head);
         } else {
-            var endPoint = url.parse('tcp:' + target),
-                clientSocket = net.connect(endPoint.port, endPoint.hostname);
-
-            clientSocket.on('connect', function () {
-                winston.debug('CONNECT-ed to ' + target);
-
-                socket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
-
-                that.flag('connect', clientSocket, socket);
-            }).on('error', function (err) {
-                winston.info('Failed to CONNECT to ' + target, { err: err });
-                socket.destroy();
-            });
+          this._debug('Failed to CONNECT to ' + target + ' via proxy, server returned ' + res.statusCode);
+          socket.destroy();
         }
+      }).on('error', err => {
+        this._debug('Failed to CONNECT to ' + target + ' via proxy', { err: err });
+        socket.destroy();
+      }).end();
+    } else {
+      const endPoint = url.parse('tcp:' + target);
+      const clientSocket = net.connect(endPoint.port, endPoint.hostname);
+
+      clientSocket.on('connect', () => {
+        this._debug('CONNECT-ed to ' + target);
+
+        socket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
+
+        this.flag('connect', clientSocket, socket);
+      }).on('error', err => {
+        this._debug('Failed to CONNECT to ' + target, { err: err });
+        socket.destroy();
+      });
     }
+  }
 
-    require('util').inherits(ConnectSession, Semaphore);
+  handleWhenConnect(s1, s2) {
+    s1.on('data', chunk => {
+      s2.write(chunk);
+    }).on('end', () => {
+      s2.end();
+    }).on('error', err => {
+      s2.destroy();
+    });
 
-    module.exports.ConnectSession = ConnectSession;
+    s2.on('data', chunk => {
+      s1.write(chunk);
+    }).on('end', () => {
+      s1.end();
+    }).on('error', err => {
+      s1.destroy();
+    });
+  }
 
-    ConnectSession.prototype.whenconnect = function (s1, s2) {
-        s1.on('data', function (chunk) {
-            s2.write(chunk);
-        }).on('end', function () {
-            s2.end();
-        }).on('error', function (err) {
-            s2.destroy();
-        });
+  handleWhenError() {
+    this._socket.destroy();
+  }
+}
 
-        s2.on('data', function (chunk) {
-            s1.write(chunk);
-        }).on('end', function () {
-            s1.end();
-        }).on('error', function (err) {
-            s1.destroy();
-        });
-    };
+module.exports = ConnectSession;
 
-    ConnectSession.prototype.whenerror = function () {
-        this._socket.destroy();
-    };
-
-    function toBase64(str) {
-        return new Buffer(str).toString('base64');
-    }
-}(
-    require('./config'),
-    require('http'),
-    require('net'),
-    require('./lib/semaphore').Semaphore,
-    require('url'),
-    require('winston')
-);
+function toBase64(str) {
+  return new Buffer(str).toString('base64');
+}

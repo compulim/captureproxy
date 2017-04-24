@@ -1,224 +1,209 @@
-!function (config, http, linq, Semaphore, url, winston, fs, path, number) {
-    'use strict';
+'use strict';
 
-    var agentKeepAlive = new (require('agentkeepalive'))(),
-        proxyHeaderPattern = /^proxy-/i,
-        sessionSeq = 0;
+const config      = require('./config');
+const filterMap   = require('./lib/filterMap');
+const fs          = require('fs');
+const http        = require('http');
+const number      = require('./lib/number');
+const path        = require('path');
+const { Semaphore } = require('./lib/semaphore');
+const url         = require('url');
 
-    function Session(req, res) {
-        var that = this,
-            method = req.method;
+const agentKeepAlive       = new (require('agentkeepalive'))();
+const PROXY_HEADER_PATTERN = /^proxy-/i;
 
-        this._debug = require('debug')(`session#${++sessionSeq}`);
+class Session extends Semaphore {
+  constructor(req, res) {
+    super();
 
-        Semaphore.call(that);
+    const method = req.method;
 
-        this._debug(`New session for ${req.url}`);
+    this._debug = require('debug')(`session#${ Math.random().toString(36).substr(2, 5) }`);
 
-        that.req = req;
-        that.res = res;
+    this._debug(`New session for ${req.url}`);
 
-        var parsedUrl = url.parse(req.url),
-            currentConfig = config(),
-            proxyConfig = currentConfig.proxy;
+    this.req = req;
+    this.res = res;
 
-        that._httpOptions = {
-            hostname: (proxyConfig || parsedUrl).hostname,
-            port: (proxyConfig || parsedUrl).port || 80,
-            path: proxyConfig ? req.url : parsedUrl.path,
-            method: method,
-            headers: linq(req.headers).where(function (name) {
-                return !proxyHeaderPattern.test(name);
-            }).run(),
-            agent: false // agentKeepAlive
-        };
+    const parsedUrl = url.parse(req.url);
+    const currentConfig = config();
+    const proxyConfig = currentConfig.proxy;
 
-        if (proxyConfig) {
-            that._httpOptions.headers.host = parsedUrl.hostname + ':' + (parsedUrl.port || 80);
-        }
+    this._httpOptions = {
+      hostname: (proxyConfig || parsedUrl).hostname,
+      port    : (proxyConfig || parsedUrl).port || 80,
+      path    : proxyConfig ? req.url : parsedUrl.path,
+      method  : method,
+      headers : filterMap(req.headers, (result, value, name) => !PROXY_HEADER_PATTERN.test(name)),
+      agent   : false // agentKeepAlive
+    };
 
-        that.when('requestbodyready', that.requestbodyready.bind(that))
-            .when('firstrequest', that.whenfirstrequest.bind(that))
-            .when('finalrequest', that.whenfinalrequest.bind(that))
-            .when('error', that.whenerror.bind(that));
+    if (proxyConfig) {
+      this._httpOptions.headers.host = parsedUrl.hostname + ':' + (parsedUrl.port || 80);
+    }
 
-        if (method === 'GET') {
-            that.flag('requestbodyready', null);
+    this
+      .when('requestbodyready', this.handleRequestBodyReady.bind(this))
+      .when('firstrequest'    , this.handleWhenFirstRequest.bind(this))
+      .when('finalrequest'    , this.handleWhenFinalRequest.bind(this))
+      .when('error'           , this.handleWhenError.bind(this));
+
+    if (method === 'GET') {
+      this.flag('requestbodyready', null);
+    } else {
+      this._debug(`Reading request body`);
+
+      readAll(req, (err, body) => {
+        if (err) {
+          this.flag('error', err);
         } else {
-            that._debug(`Reading request body`);
-
-            readAll(req, function (err, body) {
-                if (err) {
-                    that.flag('error', err);
-                } else {
-                    that._debug(`Got request body of ${body.length} bytes`)
-                    that.flag('requestbodyready', body);
-                }
-            });
-
-            req.resume();
+          this._debug(`Got request body of ${body.length} bytes`)
+          this.flag('requestbodyready', body);
         }
+      });
+
+      req.resume();
+    }
+  }
+
+  handleRequestBodyReady(body) {
+    http.request(this._httpOptions, cres => {
+      this.flag('firstrequest', cres, body);
+    }).on('error', err => {
+      this.flag('error', err);
+    }).end(body);
+  };
+
+  handleWhenFirstRequest(cres, body) {
+    const proxyConfig = config().proxy;
+
+    if (proxyConfig && cres.statusCode === 407 && cres.headers['proxy-authenticate']) {
+      this._debug(`Sending request via upstream proxy`);
+
+      var options = this._httpOptions;
+
+      options.headers['proxy-authorization'] = 'BASIC ' + toBase64(proxyConfig.username + ':' + proxyConfig.password);
+
+      http.request(options, cres => {
+        this.flag('finalrequest', cres);
+      }).on('error', err => {
+        this.flag('error', err);
+      }).end(body);
+    } else {
+      this.flag('finalrequest', cres);
+    }
+  };
+
+  handleWhenFinalRequest(cres) {
+    const { req, res }    = this;
+    let   pattern         = config().capturePattern;
+    const urlWithoutQuery = req.url.split('?')[0];
+    const basename        = url.parse(urlWithoutQuery).path.split('/').pop();
+    const filename        = path.resolve(config().capturePath || '', basename);
+    const lastReport      = Date.now();
+    let   numBytes        = 0;
+    let   writeStream;
+
+    pattern = pattern && new RegExp(pattern);
+
+    this._debug(`Sending header ${ cres.statusCode } to browser ${ JSON.stringify(cres.headers) }`);
+
+    res.writeHead(
+      cres.statusCode,
+      filterMap(cres.headers, name => !PROXY_HEADER_PATTERN.test(name))
+    );
+
+    cres.pause();
+
+    if (cres.statusCode === 200 && pattern && pattern.test(urlWithoutQuery)) {
+      this._debug(`Creating filestream for capture at ${ filename }`);
+
+      try {
+        writeStream = fs.createWriteStream(filename);
+      } catch (err) {
+        this._debug(`Failed to write to file ${ filename } due to ${ err }`);
+        res.status(500).end();
+        cres.close();
+      }
+
+      const contentLength = cres.headers['content-length'];
+
+      this._debug('Start capturing to ' + basename + (contentLength ? ' (' + number.bytes(contentLength) + ')' : ''));
     }
 
-    require('util').inherits(Session, Semaphore);
+    cres.on('data', data => {
+      this._debug(`Got ${ data.length } bytes`);
 
-    Session.prototype.requestbodyready = function (body) {
-        var that = this;
+      res.write(data);
 
-        http.request(that._httpOptions, function (cres) {
-            that.flag('firstrequest', cres, body);
-        }).on('error', function (err) {
-            that.flag('error', err);
-        }).end(body);
-    };
+      if (writeStream) {
+        const now = Date.now();
 
-    Session.prototype.whenfirstrequest = function (cres, body) {
-        var that = this,
-            proxyConfig = config().proxy;
+        writeStream.write(data);
 
-        if (proxyConfig && cres.statusCode === 407 && cres.headers['proxy-authenticate']) {
-            that._debug(`Sending request via upstream proxy`);
-
-            var options = that._httpOptions;
-
-            options.headers['proxy-authorization'] = 'BASIC ' + toBase64(proxyConfig.username + ':' + proxyConfig.password);
-
-            http.request(options, function (cres) {
-                that.flag('finalrequest', cres);
-            }).on('error', function (err) {
-                that.flag('error', err);
-            }).end(body);
-        } else {
-            that.flag('finalrequest', cres);
+        if (now - lastReport > 1000) {
+          this._debug(`Capturing to ${ basename } (${ number.bytes(numBytes + data.length) } downloaded)`);
+          lastReport = now;
         }
-    };
+      }
 
-    Session.prototype.whenfinalrequest = function (cres) {
-        var that = this,
-            req = that.req,
-            res = that.res,
-            pattern = config().capturePattern,
-            urlWithoutQuery = req.url.split('?')[0],
-            basename = url.parse(urlWithoutQuery).path.split('/').pop(),
-            filename = path.resolve(config().capturePath || '', basename),
-            writeStream,
-            lastReport = Date.now(),
-            numBytes = 0;
+      numBytes += data.length;
+    }).on('end', () => {
+      res.end();
 
-        pattern = pattern && new RegExp(pattern);
+      this._debug(`Response body finished`);
 
-        that._debug(`Sending header ${cres.statusCode} to browser ${JSON.stringify(cres.headers)}`);
+      if (writeStream) {
+        this._debug(`Closing write filestream`);
+        writeStream.close();
+        this._debug(`Captured to ${ basename } (${ number.bytes(numBytes) })`);
+      }
 
-        res.writeHead(
-            cres.statusCode,
-            linq(cres.headers).where(function (name) {
-                return !proxyHeaderPattern.test(name);
-            }).run()
-        );
+      this.flag('completed');
+      this._debug(`Completed ${ req.method } ${ req.url }`);
+    }).on('close', err => {
+      this.flag('error', err);
 
-        cres.pause();
+      this._debug(`Response body aborted`);
 
-        if (cres.statusCode === 200 && pattern && pattern.test(urlWithoutQuery)) {
-            that._debug(`Creating filestream for capture at ${filename}`);
+      if (writeStream) {
+        this._debug(`Aborted during capture to ${ basename }`);
 
-            try {
-                writeStream = fs.createWriteStream(filename);
-            } catch (err) {
-                winston.error('Failed to write to file ' + filename + ' due to ' + err);
-                res.status(500).end();
-                cres.close();
-            }
+        writeStream.close();
 
-            var contentLength = cres.headers['content-length'];
+        setTimeout(() => {
+          fs.unlink(filename);
+        }, 5000);
+      }
+    }).resume();
+  };
 
-            winston.info('Start capturing to ' + basename + (contentLength ? ' (' + number.bytes(contentLength) + ')' : ''));
-        }
+  handleWhenError(err) {
+    const { req, res } = this;
 
-        cres.on('data', function (data) {
-            that._debug(`Got ${data.length} bytes`);
+    this._debug(`Request ${ req.method } ${ req.url } failed`, { err: err });
+    res.writeHead(502);
+    res.end(err.message);
+  };
+}
 
-            res.write(data);
+function toBase64(str) {
+  return new Buffer(str).toString('base64');
+}
 
-            if (writeStream) {
-                var now = Date.now();
+function readAll(stream, callback) {
+  var buffers = [],
+    count = 0;
 
-                writeStream.write(data);
+  stream.on('data', chunk => {
+    buffers.push(chunk);
+    count += chunk.length;
+  }).on('end', () => {
+    callback(null, Buffer.concat(buffers, count));
+    buffers = 0;
+  }).on('close', err => {
+    callback(err);
+  });
+}
 
-                if (now - lastReport > 1000) {
-                    winston.info('Capturing to ' + basename + ' (' + number.bytes(numBytes + data.length) + ' downloaded)');
-                    lastReport = now;
-                }
-            }
-
-            numBytes += data.length;
-        }).on('end', function () {
-            res.end();
-
-            that._debug(`Response body finished`);
-
-            if (writeStream) {
-                that._debug(`Closing write filestream`);
-                writeStream.close();
-                winston.info('Captured to ' + basename + ' (' + number.bytes(numBytes) + ')');
-            }
-
-            that.flag('completed');
-            winston.debug('Completed ' + req.method + ' ' + req.url);
-        }).on('close', function (err) {
-            that.flag('error', err);
-
-            that._debug(`Response body aborted`);
-
-            if (writeStream) {
-                winston.warn('Aborted during capture to ' + basename);
-
-                writeStream.close();
-
-                setTimeout(function () {
-                    fs.unlink(filename);
-                }, 5000);
-            }
-        }).resume();
-    };
-
-    Session.prototype.whenerror = function (err) {
-        var that = this,
-            req = that.req,
-            res = that.res;
-
-        winston.info('Request ' + req.method + ' ' + req.url + ' failed', { err: err });
-        res.writeHead(502);
-        res.end(err.message);
-    };
-
-    function toBase64(str) {
-        return new Buffer(str).toString('base64');
-    }
-
-    function readAll(stream, callback) {
-        var buffers = [],
-            count = 0;
-
-        stream.on('data', function (chunk) {
-            buffers.push(chunk);
-            count += chunk.length;
-        }).on('end', function () {
-            callback(null, Buffer.concat(buffers, count));
-            buffers = 0;
-        }).on('close', function (err) {
-            callback(err);
-        });
-    }
-
-    module.exports.Session = Session;
-}(
-    require('./config'),
-    require('http'),
-    require('async-linq'),
-    require('./lib/semaphore').Semaphore,
-    require('url'),
-    require('winston'),
-    require('fs'),
-    require('path'),
-    require('./lib/number')
-);
+module.exports = Session;

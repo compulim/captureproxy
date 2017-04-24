@@ -3,7 +3,7 @@ SETLOCAL ENABLEDELAYEDEXPANSION
 PUSHD "%~dp0"
 
 :LOOP
-node server.js %*
+npm start %*
 
 IF %ERRORLEVEL% EQU 2 (
     TIMEOUT 1
